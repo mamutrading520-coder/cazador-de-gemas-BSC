@@ -4,6 +4,20 @@ ingestion.py – Poll DexScreener for new BSC PancakeSwap v2/v3 pairs.
 Discovers recently-added pairs filtered to PancakeSwap v2/v3 on BSC,
 extracts key metrics and returns a list of normalised dicts.
 Poll interval is 10–20 s (configurable via POLL_INTERVAL_SECONDS env var).
+
+Discovery strategy
+------------------
+We use the DexScreener REST endpoint /latest/dex/search?q=BSC (no scraping).
+This returns a broad mix of BSC pairs; we apply two layers of client-side
+filtering:
+
+  1. chainId == "bsc"          (BSC only)
+  2. dexId in PANCAKESWAP_DEX_IDS  (explicit PancakeSwap v2/v3 allowlist)
+
+Limitation: the search endpoint ranks pairs by relevance, not creation time,
+so we may miss brand-new pairs that haven't accumulated enough activity yet.
+The PANCAKESWAP_DEX_IDS allowlist ensures we never ingest pairs from other
+DEXes regardless of how the search endpoint evolves.
 """
 
 from __future__ import annotations
@@ -23,15 +37,25 @@ logger = logging.getLogger(__name__)
 # Configuration
 # ---------------------------------------------------------------------------
 DEXSCREENER_BASE = "https://api.dexscreener.com"
-# /latest/dex/search supports chainId + dexId filters via query params
-# The "new pairs" endpoint returns recently listed pairs across all chains.
-NEW_PAIRS_URL = f"{DEXSCREENER_BASE}/latest/dex/search"
-# DexScreener also exposes /latest/dex/tokens/{tokenAddress} and
-# /latest/dex/pairs/bsc/{pairAddress} – used for enrichment below.
+
+# Primary discovery endpoint.
+# /latest/dex/search?q=BSC returns BSC-related pairs ranked by relevance.
+# Client-side filtering by chainId + PANCAKESWAP_DEX_IDS is applied afterwards.
+SEARCH_URL = f"{DEXSCREENER_BASE}/latest/dex/search"
 
 POLL_INTERVAL_SECONDS = int(os.getenv("POLL_INTERVAL_SECONDS", "15"))
 
-PANCAKESWAP_DEX_IDS = {"pancakeswap", "pancakeswapv3", "pancakeswap-v2", "pancakeswap-v3"}
+# Explicit allowlist of DexScreener dexId values that correspond to
+# PancakeSwap v2 or v3 on BSC.  Any pair whose dexId is NOT in this set
+# is silently dropped, regardless of what the search endpoint returns.
+PANCAKESWAP_DEX_IDS: frozenset[str] = frozenset({
+    "pancakeswap",       # PancakeSwap v2 (canonical id used by DexScreener)
+    "pancakeswap-v2",    # alternate hyphenated form observed in API responses
+    "pancakeswapv2",     # alternate non-hyphenated form
+    "pancakeswap-v3",    # PancakeSwap v3
+    "pancakeswapv3",     # alternate non-hyphenated form
+})
+
 BSC_CHAIN_ID = "bsc"
 
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "10"))
@@ -91,9 +115,11 @@ def _normalise_pair(pair: dict) -> dict | None:
 
     if chain_id != BSC_CHAIN_ID:
         return None
-    # DexScreener uses "pancakeswap", "pancakeswap-v2", "pancakeswap-v3" etc.
-    # All PancakeSwap variants share the "pancakeswap" prefix.
-    if not dex_id.startswith("pancakeswap"):
+    # Strict allowlist: only accept the exact dexId values we know correspond
+    # to PancakeSwap v2 or v3 on BSC.  This prevents pairs from other DEXes
+    # (e.g. Biswap, ApeSwap) from slipping through even if a future search
+    # result includes them.
+    if dex_id not in PANCAKESWAP_DEX_IDS:
         return None
 
     base_token = pair.get("baseToken") or {}
@@ -141,17 +167,18 @@ def fetch_new_bsc_pairs() -> list[dict]:
     """
     Query DexScreener for recently listed BSC PancakeSwap pairs.
 
+    Uses /latest/dex/search?q=BSC then applies client-side filtering:
+      - chainId must be "bsc"
+      - dexId must be in PANCAKESWAP_DEX_IDS (explicit v2/v3 allowlist)
+
     Returns a (possibly empty) list of normalised pair dicts.
-    On any error, logs and returns [].
+    On any error, logs and returns [] (fail-safe for callers).
     """
     session = _get_session()
 
-    # DexScreener /latest/dex/search?q=<query> returns pairs matching the query.
-    # Using a broad BSC-specific query.  The "new pairs" page uses the same
-    # endpoint with chainId filtering applied client-side.
     params = {"q": "BSC"}
     try:
-        resp = session.get(NEW_PAIRS_URL, params=params, timeout=REQUEST_TIMEOUT)
+        resp = session.get(SEARCH_URL, params=params, timeout=REQUEST_TIMEOUT)
     except requests.RequestException as exc:
         logger.error("DexScreener request failed: %s", exc)
         return []
@@ -173,13 +200,31 @@ def fetch_new_bsc_pairs() -> list[dict]:
         return []
 
     raw_pairs = data.get("pairs") or []
+    logger.debug("DexScreener raw pairs returned by search: %d", len(raw_pairs))
+
     results: list[dict] = []
+    skipped_chain = 0
+    skipped_dex = 0
     for raw in raw_pairs:
+        chain_id = (raw.get("chainId") or "").lower()
+        dex_id = (raw.get("dexId") or "").lower()
+        if chain_id != BSC_CHAIN_ID:
+            skipped_chain += 1
+            continue
+        if dex_id not in PANCAKESWAP_DEX_IDS:
+            skipped_dex += 1
+            continue
         normalised = _normalise_pair(raw)
         if normalised is not None:
             results.append(normalised)
 
-    logger.info("DexScreener returned %d BSC PancakeSwap pair(s)", len(results))
+    logger.info(
+        "DexScreener discovery: raw=%d bsc_pancakeswap=%d skipped_chain=%d skipped_dex=%d",
+        len(raw_pairs),
+        len(results),
+        skipped_chain,
+        skipped_dex,
+    )
     return results
 
 

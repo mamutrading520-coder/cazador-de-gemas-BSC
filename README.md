@@ -16,19 +16,25 @@ security gating, SQLite for persistence, and Telegram for alert delivery.
 DexScreener API (polling)
         |
         v
-  ingestion.py   --  Discover BSC PancakeSwap v2/v3 pairs every 10-20 s
+  ingestion.py   --  Discover BSC PancakeSwap v2/v3 pairs every ~15 s
+                     (explicit dexId allowlist: pancakeswap, pancakeswap-v2,
+                      pancakeswap-v3 and non-hyphenated variants)
         |
         v
   security.py    --  GoPlus + Honeypot.is (fail-closed gate)
-        |  (pass)
+        |
+        +--[UNSAFE]--> database.py  --  Persist snapshot for later analysis
+        |                               (no alert, no analysis for unsafe tokens)
+        |
+        | [SAFE]
         v
-  database.py    --  Persist token, snapshot, alert in SQLite
+  database.py    --  Persist token + snapshot in SQLite
         |
         v
   analyzer.py    --  Heuristic quantitative scoring on first secure snapshot
         |  (signal)
         v
-  notifier.py    --  Telegram Bot API alert
+  notifier.py    --  Telegram Bot API alert (no-op when creds absent)
         |
         v
   database.py    --  Persist alert (de-duplicated across restarts)
@@ -139,6 +145,10 @@ is `AUTOINCREMENT` (-> `SERIAL`/`BIGSERIAL` in Postgres) and `INTEGER PRIMARY KE
   return an empty response, the token is treated as **unsafe** and skipped.
 - **No analysis before security**: price/volume analysis only runs on snapshots
   captured *after* the security check passes.
+- **Unsafe token storage**: snapshots for tokens that fail the security gate are
+  still persisted in SQLite (table `snapshots`, `security_ok=0`).  They are
+  never analysed or alerted, but they are available for offline research and
+  threshold calibration.
 - **No auto-trading**: the system has no wallet integration; it only reads
   public market data and sends read-only alerts.
 

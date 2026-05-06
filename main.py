@@ -66,10 +66,11 @@ def _process_pairs(conn, pairs: list[dict]) -> None:
     """
     For each pair discovered by the ingestion layer:
       1. Ensure the token is in the DB.
-      2. If not yet security-checked, run the security gate.
-      3. If security passes, persist a snapshot.
-      4. On the first secure snapshot, run the analyser.
-      5. If signal fires and no prior alert → send Telegram + persist alert.
+      2. If not yet security-checked, run the security gate (fail-closed).
+      3. Always persist a snapshot (even for unsafe tokens – kept for analysis).
+      4. Skip analysis/alert if security did not pass.
+      5. On the first secure snapshot, run the analyser.
+      6. If signal fires and no prior alert → send Telegram + persist alert.
     """
     for pair in pairs:
         if _stop.is_set():
@@ -90,18 +91,21 @@ def _process_pairs(conn, pairs: list[dict]) -> None:
 
         token_row = database.get_token(conn, token_address)
 
-        # --- 2. Security gate ---
+        # --- 2. Security gate (fail-closed) ---
         if not token_row["security_checked_at"]:
             ok, score, raw = security.check_token_security(token_address)
             database.update_token_security(conn, token_address, ok, score, raw)
             token_row = database.get_token(conn, token_address)
+            logger.info(
+                "security_result token=%s ok=%s score=%.1f",
+                token_address,
+                bool(token_row["security_ok"]),
+                float(token_row["security_score"]),
+            )
 
-        if not token_row["security_ok"]:
-            logger.debug("Token %s failed security – skipping", token_address)
-            continue
-
-        # --- 3. Persist snapshot ---
-        database.insert_snapshot(
+        # --- 3. Always persist snapshot (safe and unsafe tokens alike) ---
+        # Unsafe-token snapshots are kept in the DB for later offline analysis.
+        snap_id = database.insert_snapshot(
             conn,
             token_address=token_address,
             pair_address=pair["pair_address"],
@@ -114,10 +118,28 @@ def _process_pairs(conn, pairs: list[dict]) -> None:
             fdv=pair["fdv"] or None,
             pair_url=pair["url"],
         )
+        logger.info(
+            "snapshot_insert id=%s token=%s pair=%s security_ok=%s liq=%.0f vol5m=%.0f",
+            snap_id,
+            token_address,
+            pair["pair_address"],
+            bool(token_row["security_ok"]),
+            pair["liq_usd"] or 0,
+            pair["vol_5m_usd"] or 0,
+        )
 
-        # --- 4. Analyse first secure snapshot ---
+        # --- 4. Skip analysis for unsafe tokens ---
+        if not token_row["security_ok"]:
+            logger.debug(
+                "token=%s security_ok=False – snapshot stored, analysis skipped",
+                token_address,
+            )
+            continue
+
+        # --- 5. Analyse first secure snapshot ---
         # Only analyse once (when no alert exists yet)
         if database.has_alert(conn, token_address):
+            logger.debug("alert_dedupe token=%s – already alerted, skipping", token_address)
             continue
 
         snap = database.get_first_secure_snapshot(conn, token_address)
@@ -134,11 +156,18 @@ def _process_pairs(conn, pairs: list[dict]) -> None:
             fdv=snap["fdv"],
             price_usd=snap["price_usd"],
         )
+        logger.info(
+            "signal_eval token=%s signal=%s score=%.1f reason=%s",
+            token_address,
+            result.signal,
+            result.score,
+            result.reason,
+        )
 
         if not result.signal:
             continue
 
-        # --- 5. Alert ---
+        # --- 6. Alert ---
         inserted = database.insert_alert(
             conn,
             token_address=token_address,
@@ -149,8 +178,15 @@ def _process_pairs(conn, pairs: list[dict]) -> None:
 
         if not inserted:
             # Another run already alerted – skip Telegram
+            logger.info("alert_dedupe token=%s – concurrent insert lost race, skipping notify", token_address)
             continue
 
+        logger.info(
+            "alert_triggered token=%s score=%.1f reason=%s",
+            token_address,
+            result.score,
+            result.reason,
+        )
         notifier.send_alert(
             token_address=token_address,
             name=token_row["name"],
@@ -172,6 +208,7 @@ def main() -> None:
     conn = database.init_db(db_path)
 
     def _ingestion_callback(pairs: list[dict]) -> None:
+        logger.info("ingestion_batch pairs_discovered=%d", len(pairs))
         try:
             _process_pairs(conn, pairs)
         except Exception as exc:
