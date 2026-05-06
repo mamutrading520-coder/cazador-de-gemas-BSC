@@ -16,6 +16,7 @@ import signal
 import sys
 import threading
 import time
+from types import FrameType
 
 from dotenv import load_dotenv
 
@@ -48,7 +49,7 @@ logger = logging.getLogger("main")
 _stop = threading.Event()
 
 
-def _handle_signal(signum, frame):  # noqa: ANN001
+def _handle_signal(signum: int, frame: FrameType | None) -> None:
     logger.info("Received signal %s – shutting down gracefully…", signum)
     _stop.set()
 

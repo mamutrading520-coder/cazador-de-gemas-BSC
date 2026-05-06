@@ -91,7 +91,9 @@ def _normalise_pair(pair: dict) -> dict | None:
 
     if chain_id != BSC_CHAIN_ID:
         return None
-    if not any(dex_id == d or dex_id.startswith(d) for d in PANCAKESWAP_DEX_IDS):
+    # DexScreener uses "pancakeswap", "pancakeswap-v2", "pancakeswap-v3" etc.
+    # All PancakeSwap variants share the "pancakeswap" prefix.
+    if not dex_id.startswith("pancakeswap"):
         return None
 
     base_token = pair.get("baseToken") or {}

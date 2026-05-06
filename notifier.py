@@ -162,7 +162,10 @@ def send_alert(
             continue
 
         if resp.status_code == 429:
-            retry_after = int(resp.json().get("parameters", {}).get("retry_after", BACKOFF_BASE ** (attempt + 1)))
+            try:
+                retry_after = int(resp.json().get("parameters", {}).get("retry_after", BACKOFF_BASE ** (attempt + 1)))
+            except (ValueError, KeyError, TypeError):
+                retry_after = int(BACKOFF_BASE ** (attempt + 1))
             logger.warning("Telegram rate-limited; sleeping %ss", retry_after)
             time.sleep(retry_after)
             attempt += 1

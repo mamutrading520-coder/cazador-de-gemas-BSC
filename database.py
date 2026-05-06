@@ -80,6 +80,15 @@ _DDL = [
 # ---------------------------------------------------------------------------
 
 def get_connection(db_path: str = DB_PATH) -> sqlite3.Connection:
+    """
+    Open a SQLite connection.
+
+    Note: check_same_thread=False is safe here because the pipeline is
+    single-threaded (one orchestrator loop, no concurrent writers).
+    WAL mode provides additional safety for potential read-only queries
+    from other processes. If you add multi-threading, add explicit
+    locking or use a connection-per-thread pattern.
+    """
     conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")

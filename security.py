@@ -30,7 +30,7 @@ REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT_SECONDS", "10"))
 MAX_RETRIES = int(os.getenv("SECURITY_MAX_RETRIES", "3"))
 BACKOFF_BASE = float(os.getenv("SECURITY_BACKOFF_BASE", "1.5"))
 
-BSC_CHAIN_ID_GOPLUS = "56"  # GoPlus uses numeric chain IDs
+BSC_CHAIN_ID_GOPLUS = "56"  # GoPlus uses numeric chain IDs (BSC = 56)
 
 # ---------------------------------------------------------------------------
 # Shared session
@@ -123,13 +123,11 @@ def _score_goplus(gp: dict) -> tuple[bool, float]:
     hard_fail_keys = [
         "is_honeypot",
         "is_blacklisted",
-        "is_whitelisted",  # whitelist can be used to trap; treat as suspicious
         "hidden_owner",
         "can_take_back_ownership",
         "owner_change_balance",
         "selfdestruct",
         "external_call",
-        "is_anti_whale",  # Some anti-whale mechanisms block sells
     ]
     for key in hard_fail_keys:
         if str(gp.get(key, "0")) == "1":
@@ -156,8 +154,6 @@ def _score_goplus(gp: dict) -> tuple[bool, float]:
 
     if str(gp.get("is_mintable", "0")) == "1":
         score -= 20
-    if str(gp.get("can_take_back_ownership", "0")) == "1":
-        score -= 20
     if buy_tax > 0.1:
         score -= 10
     if sell_tax > 0.1:
@@ -166,6 +162,10 @@ def _score_goplus(gp: dict) -> tuple[bool, float]:
         score -= 10
     if str(gp.get("transfer_pausable", "0")) == "1":
         score -= 15
+    if str(gp.get("is_whitelisted", "0")) == "1":
+        score -= 10  # whitelist may indicate restricted access
+    if str(gp.get("is_anti_whale", "0")) == "1":
+        score -= 10  # anti-whale may impede selling
 
     lp_holders = gp.get("lp_holders") or []
     # Check if any LP holder is not locked (locked = 1)
@@ -191,7 +191,7 @@ def _check_honeypot(token_address: str) -> dict[str, Any]:
     Call Honeypot.is API for BSC (chainID=4).
     Returns parsed dict or {} on any failure.
     """
-    # chainID 4 = BSC on honeypot.is  (1=ETH, 4=BSC)
+    # chainID 56 = BSC on honeypot.is
     url = f"{HONEYPOT_BASE}/IsHoneypot"
     params = {"address": token_address.lower(), "chainID": "56"}
 

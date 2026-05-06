@@ -107,11 +107,10 @@ def analyse_snapshot(
     if vol < MIN_VOL5_USD:
         failures.append(f"vol_5m={vol:.0f} < MIN_VOL5_USD={MIN_VOL5_USD:.0f}")
 
-    if total_txns == 0 or buy_ratio < MIN_BUY_RATIO:
-        failures.append(
-            f"buy_ratio={buy_ratio:.2f} < MIN_BUY_RATIO={MIN_BUY_RATIO:.2f}"
-            + (" (no txns)" if total_txns == 0 else "")
-        )
+    if total_txns == 0:
+        failures.append("buy_ratio=0.00 < MIN_BUY_RATIO=%.2f (no txns)" % MIN_BUY_RATIO)
+    elif buy_ratio < MIN_BUY_RATIO:
+        failures.append(f"buy_ratio={buy_ratio:.2f} < MIN_BUY_RATIO={MIN_BUY_RATIO:.2f}")
 
     if fdv_to_liq is not None and fdv_to_liq > MAX_FDV_TO_LIQ:
         failures.append(
